@@ -12,10 +12,8 @@ TEST(Allocator, AllocInRange) {
     Allocator a(buf, sizeof(buf));
 
     int size = 500;
-
     Pointer p = a.alloc(size);
     char *v = reinterpret_cast<char*>(p.get());
-
     EXPECT_GE(v, buf);
     EXPECT_LE(v + size, buf + sizeof(buf));
 
@@ -107,7 +105,6 @@ TEST(Allocator, AllocReuse) {
 
     ASSERT_TRUE(fillUp(a, size, ptrs));
     a.free(ptrs[1]);
-
     EXPECT_EQ(ptrs[1].get(), nullptr);
     ptrs[1] = a.alloc(size);
 
@@ -227,12 +224,10 @@ TEST(Allocator, ReallocFromEmpty) {
 
     Pointer p;
     Pointer p1 = a.alloc(size);
-
     a.realloc(p, size);
     EXPECT_NE(p.get(), nullptr);
 
     Pointer p2 = a.alloc(size);
-
     writeTo(p, size);
     writeTo(p1, size);
     writeTo(p2, size);
