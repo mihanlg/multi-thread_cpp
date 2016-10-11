@@ -72,9 +72,11 @@ public:
 
 
 class Allocator {
+    void *_base;
+    size_t _size;
     Pointer *pointers;
 public:
-    Allocator(void *base, size_t size) {
+    Allocator(void *base, size_t size) : _base(base), _size(size) {
         Pointer::setBase(base);
         pointers = new Pointer(0, size);
     }
@@ -87,6 +89,5 @@ public:
     void free(Pointer &p);
     void defrag();
 
-    std::string dump() { return ""; }
+    std::string dump();
 };
-

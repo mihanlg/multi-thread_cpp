@@ -115,3 +115,8 @@ void Allocator::defrag() {
     }
     if (new_pointers != nullptr) { pointers = new_pointers; }
 }
+
+std::string Allocator::dump() {
+    std::string d((char *)_base, _size);
+    return d.c_str();
+}
