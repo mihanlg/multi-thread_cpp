@@ -118,5 +118,5 @@ void Allocator::defrag() {
 
 std::string Allocator::dump() {
     std::string d(_base, _size);
-    return d.c_str();
+    return d;
 }
