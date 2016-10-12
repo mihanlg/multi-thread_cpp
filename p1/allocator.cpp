@@ -1,14 +1,14 @@
 #include "allocator.h"
 
-void * Pointer::_base = nullptr;
+char * Pointer::_base = nullptr;
 
 void * Pointer::get() const {
     if (isFree()) { return nullptr; }
-    return (char *)_base + offset();
+    return _base + offset();
 }
 
 void Pointer::move(size_t new_offset) {
-    memmove((char*)_base + new_offset, get(), size());
+    memmove(_base + new_offset, get(), size());
     setOffset(new_offset);
 }
 
@@ -117,6 +117,6 @@ void Allocator::defrag() {
 }
 
 std::string Allocator::dump() {
-    std::string d((char *)_base, _size);
+    std::string d(_base, _size);
     return d.c_str();
 }

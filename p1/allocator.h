@@ -35,7 +35,7 @@ struct PointerInfo {
 };
 
 class Pointer {
-    static void *_base;
+    static char *_base;
     std::shared_ptr<PointerInfo> _innerStruct;
 
 public:
@@ -67,16 +67,16 @@ public:
     size_t offset() const { return _innerStruct->_offset; }
     size_t size() const { return _innerStruct->_size; }
     bool isFree() const { return _innerStruct->_isFree; }
-    static void setBase(void *new_base) { _base = new_base; }
+    static void setBase(char *new_base) { _base = new_base; }
 };
 
 
 class Allocator {
-    void *_base;
+    char *_base;
     size_t _size;
     Pointer *pointers;
 public:
-    Allocator(void *base, size_t size) : _base(base), _size(size) {
+    Allocator(char *base, size_t size) : _base(base), _size(size) {
         Pointer::setBase(base);
         pointers = new Pointer(0, size);
     }
