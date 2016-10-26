@@ -225,7 +225,7 @@ class Test6(TestBase):
         c1f.readline()
         c2f.readline()
 
-        c1.sendall("test1\ntest2\n") 
+        c1.sendall("test1\ntest2\n")
         waitFor(lambda: self.reader.countString("test2") == 1)
 
         c2.sendall("test")
@@ -234,12 +234,11 @@ class Test6(TestBase):
         msgs = ["test1\n", "test2\n", "test3\n", "test4\n"]
         for msg in msgs:
             l = c1f.readline()
-
-            self.assertTrue( l.endswith(msg), "Invalid message received message '{0}', expecting '{1}'".format(l, msg))
+            self.assertTrue(l.endswith(msg), "Invalid message received message '{0}', expecting '{1}'".format(l, msg))
 
         for msg in msgs:
             l = c2f.readline()
-            self.assertTrue( l.endswith(msg), "Invalid message received message '{0}', expecting '{1}'".format(l, msg))
+            self.assertTrue(l.endswith(msg), "Invalid message received message '{0}', expecting '{1}'".format(l, msg))
 
 
         c1.close()
