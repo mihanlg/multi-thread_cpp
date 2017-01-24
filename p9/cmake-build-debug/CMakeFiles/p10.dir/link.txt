@@ -1,1 +1,0 @@
-/usr/bin/g++   -g   CMakeFiles/p10.dir/main.cpp.o  -o p10 

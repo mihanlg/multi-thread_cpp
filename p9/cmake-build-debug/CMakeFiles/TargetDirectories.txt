@@ -1,3 +1,0 @@
-/home/mihanlg/GITHUB/multi-thread_cpp/p9/cmake-build-debug/CMakeFiles/edit_cache.dir
-/home/mihanlg/GITHUB/multi-thread_cpp/p9/cmake-build-debug/CMakeFiles/rebuild_cache.dir
-/home/mihanlg/GITHUB/multi-thread_cpp/p9/cmake-build-debug/CMakeFiles/p10.dir
