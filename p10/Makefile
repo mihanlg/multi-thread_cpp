@@ -1,20 +1,21 @@
 COMPILER         = -mpic++.mpich
 EXECUTOR         = mpiexec.mpich
-OPTIONS          = -o 
-LINKER_OPT       = 
+OPTIONS          = -o
 
 N = 100
+TARGET = exp_mpi
+CPP = main.cpp
 
 BUILD_LIST += build
 BUILD_LIST += start
 
 all: $(BUILD_LIST)
 
-build: main.cpp
-	$(COMPILER) $(OPTIONS) exp_mpi main.cpp $(LINKER_OPT)
+build: $(CPP)
+	$(COMPILER) $(OPTIONS) $(TARGET) $(CPP)
 
-exec: exp_mpi
-	$(EXECUTOR) ./exp_mpi $(N)
+start: $(TARGET)
+	$(EXECUTOR) ./$(TARGET) $(N)
 
 clean:
-	rm -rf *.o
+	rm -rf $(TARGET) *.o *~
