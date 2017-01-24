@@ -1,4 +1,4 @@
-COMPILER         = -mpic++.mpich
+COMPILER         = mpic++.mpich
 EXECUTOR         = mpiexec.mpich
 OPTIONS          = -o
 
