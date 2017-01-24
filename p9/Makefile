@@ -1,6 +1,9 @@
 COMPILER         = g++
 OPTIONS          = -std=c++11 -fopenmp -o
 
+TARGET = sort_openmp
+CPP = main.cpp
+
 BUILD_LIST += build
 BUILD_LIST += run
 
@@ -8,11 +11,11 @@ N = 10000000
 
 all: $(BUILD_LIST)
 
-build: main.cpp
-	$(COMPILER) $(OPTIONS) sort_openmp main.cpp
+build: $(CPP)
+	$(COMPILER) $(OPTIONS) $(TARGET) $(CPP)
 
-run: sort_openmp
-	./sort_openmp $(N)
+run: $(TARGET)
+	./$(TARGET) $(N)
 
 clean:
-	rm -rf *.o
+	rm -rf $(TARGET) *.o *~
