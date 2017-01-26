@@ -11,13 +11,15 @@ BUILD_LIST += test
 
 all: $(OBJS) $(BUILD_LIST)
 
+$(TARGET): build
+
 build: $(OBJS)
 	$(COMPILER) $(OPTIONS) -o $(TARGET) $(OBJS)
 	
 run: $(TARGET)
 	./$(TARGET)
 	
-test:
+test: $(TARGET)
 	./run_tests.sh ./$(TARGET)
 	
 ./%.o: ./%.cpp
