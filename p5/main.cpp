@@ -78,35 +78,6 @@ char* shmalloc(size_t size, key_t key = MEM_KEY) {
         creator = true;
         if ((shmid == -1) or (errno == EEXIST)) {
             std::cerr << getpid() << ": shmget() error" << std::endl;
-            switch (errno) {
-                case EACCES:
-                    std::cout << "The user does not have permission to access the shared memory segment, and does not have the CAP_IPC_OWNER capability in the user namespace that governs its IPC namespace." << std::endl;
-                    break; 
-                case EEXIST:
-                    std::cout << "IPC_CREAT and IPC_EXCL were specified in shmflg, but a shared memory segment already exists for key." << std::endl;
-                    break; 
-                case EINVAL:
-                    std::cout << "A segment for the given key exists, but size is greater than the size of that segment." << std::endl;
-                    break; 
-                case ENFILE:
-                    std::cout << "The system-wide limit on the total number of open files has been reached." << std::endl;
-                    break; 
-                case ENOENT:
-                    std::cout << "No segment exists for the given key, and IPC_CREAT was not specified." << std::endl;
-                    break; 
-                case ENOMEM:
-                    std::cout << "No memory could be allocated for segment overhead." << std::endl;
-                    break; 
-                case ENOSPC:
-                    std::cout << "All possible shared memory IDs have been taken (SHMMNI), or allocating a segment of the requested size would cause the system to exceed the system-wide limit on shared memory (SHMALL)" << std::endl;
-                    break; 
-                case EPERM:
-                    std::cout << "The SHM_HUGETLB flag was specified, but the caller was not privileged (did not have the CAP_IPC_LOCK capability)." << std::endl;
-                    break; 
-                default:
-                    break;
-                
-            }
             _exit(1);
         }
     }
@@ -442,7 +413,7 @@ int main(int argc, char *argv[]) {
         char *mem = (char *) shmat(shmid, 0, 0);
         if (mem == (void *) -1) {
             std::cerr << getpid() << ": shmat() error" << std::endl;
-            _exit(1);
+            return 1;
         }
         memset(mem, 0, size * BUF_LEN);
         shmdt(mem);
@@ -457,7 +428,7 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < sem_n; i++) {
             if(semctl(semid, i, SETVAL, arg) == -1) {
                 std::cerr << "semctl() error" << std::endl;
-                _exit(1);
+                return 1;
             }
         }
     }
