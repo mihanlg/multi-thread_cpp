@@ -1,3 +1,0 @@
-/home/mihanlg/GITHUB/multi-thread_cpp/p6/keyval/cmake-build-debug/CMakeFiles/edit_cache.dir
-/home/mihanlg/GITHUB/multi-thread_cpp/p6/keyval/cmake-build-debug/CMakeFiles/rebuild_cache.dir
-/home/mihanlg/GITHUB/multi-thread_cpp/p6/keyval/cmake-build-debug/CMakeFiles/keyval.dir
