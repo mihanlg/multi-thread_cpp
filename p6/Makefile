@@ -1,5 +1,6 @@
 COMPILER         = g++
 OPTIONS          = -std=c++11
+LIBRARIES        = -lrt -pthread
 
 TARGET = cash_server
 CPP = main.cpp
@@ -12,7 +13,7 @@ N = 1000
 all: $(BUILD_LIST)
 
 build: $(CPP)
-	$(COMPILER) $(OPTIONS) -o $(TARGET) $(CPP) -lrt
+	$(COMPILER) $(OPTIONS) -o $(TARGET) $(CPP) $(LIBRARIES)
 
 run: $(TARGET)
 	./$(TARGET) $(N)

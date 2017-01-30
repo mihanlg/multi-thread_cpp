@@ -3,204 +3,253 @@
 #include <stdexcept>
 #include <sstream>
 #include <sys/socket.h>
-#include <sys/shm.h>
+#include <sys/mman.h>
 #include <wait.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <vector>
-#include <sys/sem.h>
-#include <mqueue.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include <ctime>
+#include <chrono>
+#include <signal.h>
 
+#define TTL_LEN 8
 #define KEY_LEN 32
 #define VAL_LEN 256
-#define BUF_LEN (KEY_LEN + VAL_LEN)
+#define BUF_LEN (TTL_LEN + KEY_LEN + VAL_LEN)
 #define N_CHILDREN 4
 #define BLOCK_FOR_SEM 10
 
-key_t MEM_KEY;
-key_t SEM_KEY;
+#define SEM_NAME_TL "/sem%05d%04d"
+#define MEM_NAME_TL "/mem%05d"
 
-union semun {
-    int val;
-    struct semid_ds *buf;
-    ushort *array;
+std::vector<pid_t> children;
+
+class SocketTransfer {
+public:
+    static void send(int socket, int fd) {
+        struct msghdr msg = {0};
+        char buf[CMSG_SPACE(sizeof(fd))];
+        memset(buf, 0, sizeof(buf));
+        struct iovec io;
+        io.iov_base = (char *) "AC";
+        io.iov_len = 2;
+        msg.msg_iov = &io;
+        msg.msg_iovlen = 1;
+        msg.msg_control = buf;
+        msg.msg_controllen = sizeof(buf);
+        struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
+        *((int *) CMSG_DATA(cmsg)) = fd;
+        msg.msg_controllen = cmsg->cmsg_len;
+        if (sendmsg(socket, &msg, 0) < 0) {
+            std::cerr << "sendmsg() error" << std::endl;
+            _exit(1);
+        }
+    }
+    static int recv(int socket) {
+        struct msghdr msg = {0};
+        char m_buffer[256];
+        struct iovec io = { .iov_base = m_buffer, .iov_len = sizeof(m_buffer) };
+        msg.msg_iov = &io;
+        msg.msg_iovlen = 1;
+        char c_buffer[256];
+        msg.msg_control = c_buffer;
+        msg.msg_controllen = sizeof(c_buffer);
+        if (recvmsg(socket, &msg, 0) < 0) {
+            std::cerr << "recvmsg() error" << std::endl;
+            _exit(1);
+        }
+        struct cmsghdr * cmsg = CMSG_FIRSTHDR(&msg);
+        unsigned char * data = CMSG_DATA(cmsg);
+        int fd = *((int*) data);
+        return fd;
+    }
 };
 
-static const int p_socket = 0;
-static const int c_socket = 1;
+class Cleaner;
 
-/*static void sendfd(int socket, int fd) {
-    struct msghdr msg = {0};
-    char buf[CMSG_SPACE(sizeof(fd))];
-    memset(buf, 0, sizeof(buf));
-    struct iovec io;
-    io.iov_base = (char *) "AC";
-    io.iov_len = 2;
-    msg.msg_iov = &io;
-    msg.msg_iovlen = 1;
-    msg.msg_control = buf;
-    msg.msg_controllen = sizeof(buf);
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
-    *((int *) CMSG_DATA(cmsg)) = fd;
-    msg.msg_controllen = cmsg->cmsg_len;
-    if (sendmsg(socket, &msg, 0) < 0) {
-        std::cerr << "sendmsg() error" << std::endl;
-        _exit(1);
+class Semaphore {
+public:
+    static int count_sems(size_t size) {
+        return std::max(0, static_cast<int>(size) - 1)/BLOCK_FOR_SEM + 1;
     }
-}
-
-static int recvfd(int socket) {
-    struct msghdr msg = {0};
-    char m_buffer[256];
-    struct iovec io = { .iov_base = m_buffer, .iov_len = sizeof(m_buffer) };
-    msg.msg_iov = &io;
-    msg.msg_iovlen = 1;
-    char c_buffer[256];
-    msg.msg_control = c_buffer;
-    msg.msg_controllen = sizeof(c_buffer);
-    if (recvmsg(socket, &msg, 0) < 0) {
-        std::cerr << "recvmsg() error" << std::endl;
-        _exit(1);
+    static int get_sem_id(size_t pos) {
+        return static_cast<int>(pos/BLOCK_FOR_SEM);
     }
-    struct cmsghdr * cmsg = CMSG_FIRSTHDR(&msg);
-    unsigned char * data = CMSG_DATA(cmsg);
-    int fd = *((int*) data);
-    return fd;
-}*/
-
-char* shmalloc(size_t size, key_t key = MEM_KEY) {
-    int shmid = shmget(key, size*BUF_LEN, 0666);
-    bool creator = false;
-    if (shmid == -1) {
-        shmid = shmget(key, size * BUF_LEN, 0666 | IPC_CREAT);
-        creator = true;
-        if ((shmid == -1) or (errno == EEXIST)) {
-            std::cerr << getpid() << ": shmget() error" << std::endl;
-            _exit(1);
+    static std::vector<sem_t *> seminit(int sem_n, int prefix) {
+        std::vector<sem_t *> sems;
+        sem_t *sem;
+        char buf_sem[14];
+        for (int i = 0; i < sem_n; i++) {
+            sprintf(buf_sem, SEM_NAME_TL, prefix, i);
+            if((sem = sem_open(buf_sem, O_CREAT, 0666, 1)) == SEM_FAILED) {
+                std::cerr << "sem_open() error" << std::endl;
+                exit(1);
+            }
+            sems.push_back(sem);
         }
+        return sems;
     }
-    char *mem = (char *)shmat(shmid, 0, 0);
-    if (mem == (void *)-1) {
-        std::cerr << getpid() << ": shmat() error" << std::endl;
-        _exit(1);
-    }
-    if (creator)
-        memset(mem, 0, size*BUF_LEN);
-    return mem;
-}
-
-int semload(key_t key, int size) {
-    int semid = semget(key, size, 0666);
-    bool creator = false;
-    if (semid == -1) {
-        semid = semget(key, size, 0666 | IPC_CREAT);
-        if (semid == -1) {
-            std::cerr << getpid() << ": semget() error" << std::endl;
-            _exit(1);
-        }
-        creator = true;
-    }
-    if (creator) {
-        union semun arg;
-        arg.val = 1;
-        for (int i = 0; i < size; i++) {
-            if (semctl(semid, i, SETVAL, arg) == -1) {
-                std::cerr << "semctl() error" << std::endl;
+    static std::vector<sem_t *> semload(int sem_n, int prefix) {
+        std::vector<sem_t *> sems;
+        sem_t *sem;
+        char buf[14];
+        for (int i = 0; i < sem_n; i++) {
+            sprintf(buf, SEM_NAME_TL, prefix, i);
+            if((sem = sem_open(buf, 0)) == SEM_FAILED) {
+                std::cerr << "sem_open() error" << std::endl;
                 _exit(1);
             }
+            sems.push_back(sem);
         }
+        return sems;
     }
-    return semid;
-}
+};
+
+class SharedMemory {
+public:
+    static char *shminit(size_t size) {
+        char buf_mem[10];
+        sprintf(buf_mem, MEM_NAME_TL, getpid());
+        int shmid;
+        if((shmid = shm_open(buf_mem, O_CREAT|O_RDWR|O_TRUNC, 0666)) == -1) {
+            std::cerr << "shm_open() error" << std::endl;
+            exit(1);
+        }
+        if(ftruncate(shmid, size) == -1) {
+            std::cerr << "ftruncate() error" << std::endl;
+            exit(1);
+        }
+        char *mem = (char *)mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, shmid, 0);
+        if(mem == MAP_FAILED) {
+            std::cerr << "mmap() error" << std::endl;
+            exit(1);
+        }
+        memset(mem, 0, size);
+        return mem;
+    }
+    static char *shmload(size_t size, int prefix) {
+        char buf_mem[10];
+        sprintf(buf_mem, MEM_NAME_TL, prefix);
+        int shmid;
+        if((shmid = shm_open(buf_mem, O_RDWR, 0666)) == -1) {
+            std::cerr << getpid() << ": shm_open() error" << std::endl;
+            _exit(1);
+        }
+        size_t size_mem = size*BUF_LEN;
+        char *mem = (char *)mmap(NULL, size_mem, PROT_READ|PROT_WRITE, MAP_SHARED, shmid, 0);
+        if(mem == MAP_FAILED) {
+            std::cerr << getpid() << ": mmap() error" << std::endl;
+            _exit(1);
+        }
+        return mem;
+    }
+};
 
 class HashTable {
 public:
-    HashTable(size_t size, key_t key = MEM_KEY) : size_(size), key_(key) {
-        table_ = shmalloc(size_, key_);
-        semid_ = semload(SEM_KEY, std::max(BLOCK_FOR_SEM, static_cast<int>(size_))/BLOCK_FOR_SEM);
+    HashTable(size_t size) : size_(size) {
+        prefix_ = getppid();
+        table_ = SharedMemory::shmload(size_, prefix_);
+        sems_ = Semaphore::semload(Semaphore::count_sems(size_), prefix_);
     }
     HashTable(const HashTable & ht) {
+        prefix_ = ht.prefix_;
         size_ = ht.size_;
-        key_ = ht.key_;
-        table_ = shmalloc(size_, key_);
+        table_ = SharedMemory::shmload(size_, prefix_);
+        sems_ = Semaphore::semload(Semaphore::count_sems(size_), prefix_);
     }
     HashTable& operator=(const HashTable & ht) {
         if (this != &ht) {
-            shmdt(table_);
+            shm_unlink(table_);
             if (size_ != ht.size_) {
                 size_ = ht.size_;
             }
-            key_ = ht.key_;
-            table_ = shmalloc(size_, key_);
+            prefix_ = ht.prefix_;
+            table_ = SharedMemory::shmload(size_, prefix_);
+            sems_ = Semaphore::semload(Semaphore::count_sems(size_), prefix_);
         }
         return *this;
     }
+    friend class Cleaner;
     std::string get(std::string key) {
         check_len(key, KEY_LEN);
         size_t pos = get_key_pos(key);
         return get_value(pos);
     }
-
-    void set(std::string key, std::string value) {
+    void set(int ttl, std::string key, std::string value) {
         check_len(key, KEY_LEN);
         check_len(value, VAL_LEN);
+        if (ttl <= 0) throw std::runtime_error("Bad ttl value!");
         size_t pos = get_key_pos(key, true);
         //Create key-value buf
         char buf[BUF_LEN];
         memset(&buf[0], 0, BUF_LEN);
-        memcpy(&buf[0], key.c_str(), key.length());
-        memcpy(&buf[KEY_LEN], value.c_str(), value.length());
+        snprintf(buf, TTL_LEN, "%d", ttl);
+        memcpy(&buf[TTL_LEN], key.c_str(), key.length());
+        memcpy(&buf[TTL_LEN + KEY_LEN], value.c_str(), value.length());
         //Place information into table
+        write_line(buf, pos);
+    }
+    std::string delete_key(std::string key) {
+        check_len(key, KEY_LEN);
+        size_t pos = get_key_pos(key);
+        std::string value = get_value(pos);
+        delete_line(pos);
+        return value;
+    }
+    ~HashTable() {
+        shm_unlink(table_);
+        for(auto sem: sems_) sem_close(sem);
+    }
+
+private:
+    void write_line(const char *buf, size_t pos) {
         char* line = get_line(pos);
         enter_ca(pos);
         memcpy(line, buf, BUF_LEN);
         leave_ca(pos);
     }
-
-    std::string delete_key(std::string key) {
-        //Check key
-        check_len(key, KEY_LEN);
-        //Find key pos
-        size_t pos = get_key_pos(key);
-        //Clean line
-        std::string value = get_value(pos);
+    std::string delete_line(size_t pos) {
         char* line = get_line(pos);
         enter_ca(pos);
         memset(line, 0, BUF_LEN);
         leave_ca(pos);
-        return value;
     }
-
-    /*void print () {
-        for (size_t i = 0; i < size_; i++) {
-            std::cout << i << ": " << get_key(i) << ": " << get_value(i) << std::endl;
-        }
-    }*/
-
-    ~HashTable() {
-        shmdt(table_);
-        if(semctl(semid_, 0, IPC_RMID, 0) == -1) {
-            std::cerr << "semctl() error" << std::endl;
-            _exit(1);
-        }
-    }
-private:
     void enter_ca(size_t pos) {
-        sbf_.sem_num = static_cast<unsigned short>(pos/BLOCK_FOR_SEM);
-        sbf_.sem_op = -1;
-        if (semop(semid_, &sbf_, 1) == -1) {
-            std::cerr << "semop() error" << std::endl;
+        if (sem_wait(sems_[Semaphore::get_sem_id(pos)]) == -1) {
+            std::cerr << "sem_wait() error" << std::endl;
             _exit(1);
         }
+    }
+    int get_ttl(size_t pos) {
+        char ttl_buf[TTL_LEN];
+        char *line = get_line(pos);
+        enter_ca(pos);
+        memcpy(ttl_buf, line, TTL_LEN);
+        leave_ca(pos);
+        int ttl;
+        if (sscanf(ttl_buf, "%d", &ttl) != 1) {
+            std::cerr << "sscanf() error" << std::endl;
+            _exit(1);
+        }
+        return ttl;
+    }
+    void set_ttl(size_t pos, int ttl) {
+        char ttl_buf[TTL_LEN];
+        char *line = get_line(pos);
+        snprintf(ttl_buf, TTL_LEN, "%d", ttl);
+        enter_ca(pos);
+        memcpy(line, ttl_buf, TTL_LEN);
+        leave_ca(pos);
     }
     void leave_ca(size_t pos) {
-        sbf_.sem_num = static_cast<unsigned short>(pos/BLOCK_FOR_SEM);
-        sbf_.sem_op = 1;
-        if (semop(semid_, &sbf_, 1) == -1) {
-            std::cerr << "semop() error" << std::endl;
+        if (sem_post(sems_[Semaphore::get_sem_id(pos)]) == -1) {
+            std::cerr << "sem_wait() error" << std::endl;
             _exit(1);
         }
     }
@@ -211,7 +260,7 @@ private:
         char key[KEY_LEN];
         char *line = get_line(pos);
         enter_ca(pos);
-        memcpy(key, line, KEY_LEN);
+        memcpy(key, &line[TTL_LEN], KEY_LEN);
         leave_ca(pos);
         return std::string(key);
     }
@@ -219,7 +268,7 @@ private:
         char value[VAL_LEN];
         char *line = get_line(pos);
         enter_ca(pos);
-        memcpy(value, &line[KEY_LEN], VAL_LEN);
+        memcpy(value, &line[TTL_LEN + KEY_LEN], VAL_LEN);
         leave_ca(pos);
         return std::string(value);
     }
@@ -239,7 +288,6 @@ private:
     size_t hash(std::string str) {
         return str_hash(str) % size_;
     }
-
     void check_len(std::string str, size_t len) {
         if (str.length() > len or str.length() == 0)
             throw std::runtime_error("Bad string size: '" + str + "'!");
@@ -247,39 +295,71 @@ private:
 
 private:
     size_t size_;
-    key_t key_;
+    int prefix_;
     std::hash<std::string> str_hash;
     char* table_;
-    int semid_;
-    struct sembuf sbf_;
+    std::vector<sem_t *> sems_;
+};
+
+class Cleaner {
+public:
+    Cleaner(size_t size) : ht_(size), size_(size) {
+        std::cout << getpid() << ": Cleaner is working in background!" << std::endl;
+    }
+    void work() {
+        auto t1 = std::chrono::high_resolution_clock::now();
+        for (size_t i = 0; i < size_; i++) {
+            if (ht_.is_empty(i)) continue;
+            int ttl;
+            ttl = ht_.get_ttl(i);
+            if (ttl <= 0) {
+                ht_.delete_line(i);
+            } else {
+                ht_.set_ttl(i, ttl-1);
+            }
+        }
+        auto t2 = std::chrono::high_resolution_clock::now();
+        auto int_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1);
+        long t_sleep = (1000-int_ms.count())*1000;
+        relax(static_cast<unsigned>(std::max(t_sleep, (long)0)));
+    }
+    void relax(unsigned t) {
+        usleep(t);
+        work();
+    }
+private:
+    HashTable ht_;
+    size_t size_;
 };
 
 class TableWriter {
 public:
-    TableWriter(size_t size) : ht(size) {
+    TableWriter(size_t size) : ht_(size) {
     }
     std::string execute(std::string command_line) {
         std::istringstream iss(command_line);
         std::string command, key, value;
         iss >> command;
         if (command == "set") {
+            int ttl;
+            iss >> ttl;
             iss >> key;
             getline(iss, value);
             size_t npos = value.find_first_not_of(" \t\v\r");
             value.erase(0, npos);
-            try { ht.set(key, value); }
+            try { ht_.set(ttl, key, value); }
             catch (std::runtime_error ex) { return "error " + std::string(ex.what()); }
             return "ok " + key + " " + value;
         }
         else if (command == "get") {
             iss >> key;
-            try { value = ht.get(key); }
+            try { value = ht_.get(key); }
             catch (std::runtime_error ex) { return "error " + std::string(ex.what()); }
             return "ok " + key + " " + value;
         }
         else if (command == "delete") {
             iss >> key;
-            try { value = ht.delete_key(key); }
+            try { value = ht_.delete_key(key); }
             catch (std::runtime_error ex) { return "error " + std::string(ex.what()); }
             return "ok " + key + " " + value;
         }
@@ -288,37 +368,17 @@ public:
         }
     }
 private:
-    HashTable ht;
+    HashTable ht_;
 };
 
 class Handler {
 public:
-    Handler(size_t size, int parent) : server_(size), parent_(parent) {
-        atributos_.mq_msgsize = 50;
-        atributos_.mq_maxmsg = 10;
-        if ((messages_ = mq_open("/msg_queue", O_CREAT | O_RDONLY, 0666, &atributos_)) == -1) {
-            std::cerr << getpid() << ": mq_open() error" << std::endl;
-            _exit(1);
-        }
-    }
-    ~Handler() {
-        close(parent_);
-        mq_close(messages_);
-    }
+    Handler(size_t size, int parent) : server_(size), parent_(parent) {}
+    ~Handler() { close(parent_); }
 
     void listen() {
         std::cout << getpid() << ": Ready to work!" << std::endl;
-        //int client = recvfd(parent_);
-        char buffer[atributos_.mq_msgsize];
-        if (mq_receive(messages_, buffer, sizeof(buffer), 0) == -1) {
-            std::cerr << getpid() << ": mq_recieve() error" << std::endl;
-            _exit(1);
-        }
-        int client;
-        if (sscanf(buffer, "%d", &client) != 1) {
-            std::cerr << getpid() << ": bad message: " << buffer << std::endl;
-            _exit(1);
-        }
+        int client = SocketTransfer::recv(parent_);
         std::cout << getpid() << ": Received socket from parent: " << client << std::endl;
         //Talk to client
         talk(client);
@@ -345,174 +405,186 @@ public:
 private:
     TableWriter server_;
     int parent_;
-    mqd_t messages_;
-    struct mq_attr atributos_;
 };
 
-void start(int children) {
-    int client, listener;
-    struct sockaddr_in addr;
-    int on = 1;
-
-    //MESSAGES
-    struct mq_attr atributos;
-    atributos.mq_msgsize = 50;
-    atributos.mq_maxmsg = 10;
-    char buffer[atributos.mq_msgsize];
-    mqd_t messages;
-    if ((messages = mq_open("/msg_queue", O_CREAT | O_WRONLY, 0666, &atributos)) == -1) {
-        std::cerr << "mq_open() error" << std::endl;
-        exit(1);
+class CashServer {
+public:
+    CashServer(size_t size2) : size(size2) {
+        size_mem = size*BUF_LEN;
+        init_memory();
+        init_semaphores();
+        init_channel();
     }
-    unsigned prio = 0;
-
-    //Socket to receive connections
-    listener = socket(AF_INET, SOCK_STREAM, 0);
-    if (listener < 0) {
-        std::cerr << "Socket creation error" << std::endl;
-        close(children);
-        mq_close(messages);
-        exit(1);
+    void run() {
+        run_handlers();
+        run_cleaner();
+        signal(SIGCHLD, SIG_IGN);
+        start_listening();
     }
-    //Reuse socket
-    if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0) {
-        std::cerr << "setsockopt() failed" << std::endl;
-        close(children);
-        close(listener);
-        mq_close(messages);
-        exit(1);
+    ~CashServer() {
+        close(fd[p_socket]);
+        for (auto child: children) {
+            kill(child, SIGTERM);
+            wait(NULL);
+        }
+        shm_unlink(mem);
+        munmap(mem, size_mem);
+        for (auto sem: sems) sem_close(sem);
     }
-    //Bind socket
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(12345);
-    if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        std::cerr << "Bind error" << std::endl;
-        close(children);
-        close(listener);
-        mq_close(messages);
-        exit(1);
+private:
+    void init_memory() {
+        mem = SharedMemory::shminit(size_mem);
     }
-    //Listen
-    if (listen(listener, 5) < 0) {
-        std::cerr << "Listen error" << std::endl;
-        close(children);
-        close(listener);
-        mq_close(messages);
-        exit(1);
+    void init_semaphores() {
+        sems = Semaphore::seminit(Semaphore::count_sems(size), getpid());
     }
-    //Accept connections
-    struct timeval timeout;
-    timeout.tv_sec = 600;
-    timeout.tv_usec = 0;
-    fd_set set;
-    FD_ZERO(&set);
-    FD_SET(listener, &set);
-    while(true) {
-        int rv = select(listener+1, &set, NULL, NULL, &timeout);
-        if (rv < 0) {
-            std::cerr << "Select error" << std::endl;
-            close(children);
-            close(listener);
-            mq_close(messages);
+    void init_channel() {
+        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fd) < 0) {
+            std::cerr << "socketpair() error" << std::endl;
             exit(1);
         }
-        if (rv == 0) {
-            std::cerr << "Timeout. Shutting server down..." << std::endl;
-            break;
+    }
+    void run_handlers() {
+        //CREATE HANDLERS
+        for (int i = 0; i < N_CHILDREN; i++) {
+            pid_t pid = fork();
+            if (pid == -1) {
+                std::cerr << "fork() error" << std::endl;
+                close(fd[0]);
+                close(fd[1]);
+                exit(1);
+            }
+            if (pid == 0) {
+                //child
+                children.clear();
+                close(fd[p_socket]);
+                Handler h(size, fd[c_socket]);
+                h.listen();
+                _exit(0);
+            }
+            else children.push_back(pid);
         }
-        client = accept(listener, NULL, NULL);
-        if (client < 0) {
-            std::cerr << "Accept error" << std::endl;
-            close(children);
-            close(listener);
-            mq_close(messages);
-            exit (1);
-        }
-        //sendfd(children, client);
-        snprintf(buffer, sizeof(buffer), "%d", client);
-        if (mq_send(messages, buffer, sizeof(buffer), prio) == -1) {
-            std::cerr << "mq_send() error" << std::endl;
+        close(fd[c_socket]);
+    }
+    void run_cleaner() {
+        pid_t pid = fork();
+        if (pid == -1) {
+            std::cerr << "fork() error" << std::endl;
+            close(fd[p_socket]);
             exit(1);
         }
-        std::cout << "Sent socket to children: " << client << std::endl;
-        close(client);
+        if (pid == 0) {
+            children.clear();
+            close(fd[p_socket]);
+            Cleaner cleaner(size);
+            cleaner.work();
+            _exit(0);
+        }
+        else children.push_back(pid);
     }
-    close(listener);
-    close(children);
-    mq_close(messages);
+    void start_listening() {
+        int client, listener;
+        struct sockaddr_in addr;
+        int on = 1;
+        //Socket to receive connections
+        listener = socket(AF_INET, SOCK_STREAM, 0);
+        if (listener < 0) {
+            std::cerr << "socket() error" << std::endl;
+            close(fd[p_socket]);
+            exit(1);
+        }
+        //Reuse socket
+        if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0) {
+            std::cerr << "setsockopt() failed" << std::endl;
+            close(fd[p_socket]);
+            close(listener);
+            exit(1);
+        }
+        //Bind socket
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_port = htons(12345);
+        if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            std::cerr << "bind() error" << std::endl;
+            close(fd[p_socket]);
+            close(listener);
+            exit(1);
+        }
+        //Listen
+        if (listen(listener, 5) < 0) {
+            std::cerr << "liesten() error" << std::endl;
+            close(fd[p_socket]);
+            close(listener);
+            exit(1);
+        }
+        //Accept connections
+        struct timeval timeout;
+        timeout.tv_sec = 600;
+        timeout.tv_usec = 0;
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(listener, &set);
+        while(true) {
+            int rv = select(listener+1, &set, NULL, NULL, &timeout);
+            if (rv < 0) {
+                std::cerr << "Select error" << std::endl;
+                close(fd[p_socket]);
+                close(listener);
+                exit(1);
+            }
+            if (rv == 0) {
+                std::cerr << "Timeout. Shutting server down..." << std::endl;
+                break;
+            }
+            client = accept(listener, NULL, NULL);
+            if (client < 0) {
+                std::cerr << "Accept error" << std::endl;
+                close(fd[p_socket]);
+                close(listener);
+                exit (1);
+            }
+            SocketTransfer::send(fd[p_socket], client);
+            std::cout << "Sent socket to children_: " << client << std::endl;
+            close(client);
+        }
+        close(listener);
+        close(fd[p_socket]);
+    }
+
+private:
+    static const int p_socket = 0;
+    static const int c_socket = 1;
+    size_t size;
+    size_t size_mem;
+    char *mem;
+    std::vector<sem_t *> sems;
+    int fd[2];
+};
+
+void sigint_hdlr(int sig) {
+    signal(SIGINT, SIG_IGN);
+    for (auto child: children) {
+        kill(child, SIGTERM);
+        wait(NULL);
+    }
+    exit(130);
 }
 
 int main(int argc, char *argv[]) {
+    signal(SIGINT, sigint_hdlr);
     if (argc != 2) {
         std::cerr << "Usage: program <size>" << std::endl;
         return 1;
     }
     size_t size = static_cast<size_t>(atoi(argv[1]));
-    MEM_KEY = ftok(argv[0], 'M'+size);
-    SEM_KEY = ftok(argv[0], 'S'+size);
-    std::vector<pid_t> children;
-    //SHARED MEMORY
-    int shmid = shmget(MEM_KEY, size*BUF_LEN, 0666);
-    if (shmid != -1) {
-        std::cout << "Cleaning shared memory..." << std::endl;
-        char *mem = (char *) shmat(shmid, 0, 0);
-        if (mem == (void *) -1) {
-            std::cerr << getpid() << ": shmat() error" << std::endl;
-            _exit(1);
-        }
-        memset(mem, 0, size * BUF_LEN);
-        shmdt(mem);
+    try {
+        CashServer server(size);
+        server.run();
     }
-    //SEMAPHORES
-    int sem_n = std::max(BLOCK_FOR_SEM, static_cast<int>(size))/BLOCK_FOR_SEM;
-    int semid = semget(SEM_KEY, sem_n, 0666);
-    if (semid != -1) {
-        std::cout << "Cleaning semaphores..." << std::endl;
-        union semun arg;
-        arg.val = 1;
-        for (int i = 0; i < sem_n; i++) {
-            if(semctl(semid, i, SETVAL, arg) == -1) {
-                std::cerr << "semctl() error" << std::endl;
-                _exit(1);
-            }
-        }
+    catch (std::exception e) {
+        std::cerr << getpid() << ": " << e.what() << std::endl;
+        exit(1);
     }
-    //CREATE SOCKET TO COMMUNICATE WITH CHILDREN
-    int fd[2];
-    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fd) < 0) {
-        std::cerr << "socketpair() error" << std::endl;
-        return 1;
-    }
-    //CREATE HANDLERS
-    for (int i = 0; i < N_CHILDREN; i++) {
-        pid_t pid = fork();
-        if (pid == -1) {
-            std::cerr << "Fork error" << std::endl;
-            close(fd[0]);
-            close(fd[1]);
-            return 1;
-        }
-        if (pid == 0) {
-            //child
-            close(fd[p_socket]);
-            Handler h(size, fd[c_socket]);
-            h.listen();
-            _exit(0);
-        }
-        else children.push_back(pid);
-    }
-    //FINISH
-    close(fd[c_socket]);
-    start(fd[p_socket]);
-    for (auto child: children) {
-        kill(child, SIGINT);
-        wait(NULL);
-    }
-    close(fd[p_socket]);
-    shmctl(shmid, IPC_RMID, 0);
-    semctl(semid, 0, IPC_RMID, 0);
-    mq_unlink("/msg_queue");
     return 0;
 }

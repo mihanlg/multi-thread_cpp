@@ -31,4 +31,10 @@ fcntl.h
 -
 semaphore.h
 -
+ctime
+-
+chrono
+-
+signal.h
+-
 

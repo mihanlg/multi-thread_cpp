@@ -12,7 +12,7 @@ N = 1000
 all: $(BUILD_LIST)
 
 build: $(CPP)
-	$(COMPILER) $(OPTIONS) -o $(TARGET) $(CPP)
+	$(COMPILER) $(OPTIONS) -o $(TARGET) $(CPP) -lrt
 
 run: $(TARGET)
 	./$(TARGET) $(N)
