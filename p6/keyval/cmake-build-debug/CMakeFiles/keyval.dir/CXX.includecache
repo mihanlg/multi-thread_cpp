@@ -17,7 +17,7 @@ sstream
 -
 sys/socket.h
 -
-sys/shm.h
+sys/mman.h
 -
 wait.h
 -
@@ -27,6 +27,8 @@ unistd.h
 -
 vector
 -
-sys/sem.h
+fcntl.h
+-
+semaphore.h
 -
 

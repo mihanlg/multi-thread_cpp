@@ -1,1 +1,1 @@
-/usr/bin/c++   -g   CMakeFiles/keyval.dir/main.cpp.o  -o keyval 
+/usr/bin/c++   -g   CMakeFiles/keyval.dir/main.cpp.o  -o keyval -lpthread -lrt 
