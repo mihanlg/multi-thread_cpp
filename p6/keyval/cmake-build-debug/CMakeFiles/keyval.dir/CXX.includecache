@@ -1,0 +1,32 @@
+#IncludeRegexLine: ^[ 	]*#[ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/mihanlg/GITHUB/multi-thread_cpp/p6/keyval/main.cpp
+iostream
+-
+cstring
+-
+stdexcept
+-
+sstream
+-
+sys/socket.h
+-
+sys/shm.h
+-
+wait.h
+-
+netinet/in.h
+-
+unistd.h
+-
+vector
+-
+signal.h
+-
+
