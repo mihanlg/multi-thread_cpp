@@ -8,43 +8,152 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <vector>
-#include <signal.h>
+#include <sys/sem.h>
 
 #define KEY_LEN 32
 #define VAL_LEN 256
 #define BUF_LEN (KEY_LEN + VAL_LEN)
-#define MEM_KEY 1009
-
 #define N_CHILDREN 4
+#define BLOCK_FOR_SEM 10
+
+key_t MEM_KEY;
+key_t SEM_KEY;
+
+union semun {
+    int val;
+    struct semid_ds *buf;
+    ushort *array;
+};
 
 static const int p_socket = 0;
 static const int c_socket = 1;
 
-class HashTable {
-    static char* set_shm(size_t size, key_t key) {
-        //Find table
-        int shmid = shmget(key, size*BUF_LEN, 0666);
-        std::cout << shmid << std::endl;
-        if (shmid == -1) {
-            std::cerr << getpid() << ": shmget() error" << std::endl;
-            _exit(1);
-        }
-        //Access table
-        char* mem = (char *)shmat(shmid, 0, 0);
-        if (mem == (void *)-1) {
-            std::cerr << getpid() << ": shmat() error" << std::endl;
-            _exit(1);
-        }
-        return mem;
+static void sendfd(int socket, int fd) {
+    struct msghdr msg = {0};
+    char buf[CMSG_SPACE(sizeof(fd))];
+    memset(buf, 0, sizeof(buf));
+    struct iovec io;
+    io.iov_base = (char *) "AC";
+    io.iov_len = 2;
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    msg.msg_control = buf;
+    msg.msg_controllen = sizeof(buf);
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
+    *((int *) CMSG_DATA(cmsg)) = fd;
+    msg.msg_controllen = cmsg->cmsg_len;
+    if (sendmsg(socket, &msg, 0) < 0) {
+        std::cerr << "sendmsg() error" << std::endl;
+        _exit(1);
     }
+}
+
+static int recvfd(int socket) {
+    struct msghdr msg = {0};
+    char m_buffer[256];
+    struct iovec io = { .iov_base = m_buffer, .iov_len = sizeof(m_buffer) };
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    char c_buffer[256];
+    msg.msg_control = c_buffer;
+    msg.msg_controllen = sizeof(c_buffer);
+    if (recvmsg(socket, &msg, 0) < 0) {
+        std::cerr << "recvmsg() error" << std::endl;
+        _exit(1);
+    }
+    struct cmsghdr * cmsg = CMSG_FIRSTHDR(&msg);
+    unsigned char * data = CMSG_DATA(cmsg);
+    int fd = *((int*) data);
+    return fd;
+}
+
+char* shmalloc(size_t size, key_t key = MEM_KEY) {
+    int shmid = shmget(key, size*BUF_LEN, 0666);
+    bool creator = false;
+    if (shmid == -1) {
+        shmid = shmget(key, size * BUF_LEN, 0666 | IPC_CREAT);
+        creator = true;
+        if ((shmid == -1) or (errno == EEXIST)) {
+            std::cerr << getpid() << ": shmget() error" << std::endl;
+            switch (errno) {
+                case EACCES:
+                    std::cout << "The user does not have permission to access the shared memory segment, and does not have the CAP_IPC_OWNER capability in the user namespace that governs its IPC namespace." << std::endl;
+                    break; 
+                case EEXIST:
+                    std::cout << "IPC_CREAT and IPC_EXCL were specified in shmflg, but a shared memory segment already exists for key." << std::endl;
+                    break; 
+                case EINVAL:
+                    std::cout << "A segment for the given key exists, but size is greater than the size of that segment." << std::endl;
+                    break; 
+                case ENFILE:
+                    std::cout << "The system-wide limit on the total number of open files has been reached." << std::endl;
+                    break; 
+                case ENOENT:
+                    std::cout << "No segment exists for the given key, and IPC_CREAT was not specified." << std::endl;
+                    break; 
+                case ENOMEM:
+                    std::cout << "No memory could be allocated for segment overhead." << std::endl;
+                    break; 
+                case ENOSPC:
+                    std::cout << "All possible shared memory IDs have been taken (SHMMNI), or allocating a segment of the requested size would cause the system to exceed the system-wide limit on shared memory (SHMALL)" << std::endl;
+                    break; 
+                case EPERM:
+                    std::cout << "The SHM_HUGETLB flag was specified, but the caller was not privileged (did not have the CAP_IPC_LOCK capability)." << std::endl;
+                    break; 
+                default:
+                    break;
+                
+            }
+            _exit(1);
+        }
+    }
+    char *mem = (char *)shmat(shmid, 0, 0);
+    if (mem == (void *)-1) {
+        std::cerr << getpid() << ": shmat() error" << std::endl;
+        _exit(1);
+    }
+    if (creator)
+        memset(mem, 0, size*BUF_LEN);
+    return mem;
+}
+
+int semload(key_t key, int size) {
+    int semid = semget(key, size, 0666);
+    bool creator = false;
+    if (semid == -1) {
+        semid = semget(key, size, 0666 | IPC_CREAT);
+        if (semid == -1) {
+            std::cerr << getpid() << ": semget() error" << std::endl;
+            _exit(1);
+        }
+        creator = true;
+    }
+    if (creator) {
+        union semun arg;
+        arg.val = 1;
+        for (int i = 0; i < size; i++) {
+            if (semctl(semid, i, SETVAL, arg) == -1) {
+                std::cerr << "semctl() error" << std::endl;
+                _exit(1);
+            }
+        }
+    }
+    return semid;
+}
+
+class HashTable {
 public:
     HashTable(size_t size, key_t key = MEM_KEY) : size_(size), key_(key) {
-        table_ = set_shm(size_, key_);
+        table_ = shmalloc(size_, key_);
+        semid_ = semload(SEM_KEY, std::max(BLOCK_FOR_SEM, static_cast<int>(size_))/BLOCK_FOR_SEM);
     }
     HashTable(const HashTable & ht) {
         size_ = ht.size_;
         key_ = ht.key_;
-        table_ = set_shm(size_, key_);
+        table_ = shmalloc(size_, key_);
     }
     HashTable& operator=(const HashTable & ht) {
         if (this != &ht) {
@@ -53,24 +162,19 @@ public:
                 size_ = ht.size_;
             }
             key_ = ht.key_;
-            table_ = set_shm(size_, key_);
+            table_ = shmalloc(size_, key_);
         }
         return *this;
     }
     std::string get(std::string key) {
-        //Check key
         check_len(key, KEY_LEN);
-        //Find key pos
         size_t pos = get_key_pos(key);
-        //Return value
         return get_value(pos);
     }
 
     void set(std::string key, std::string value) {
-        //Check key and value
         check_len(key, KEY_LEN);
         check_len(value, VAL_LEN);
-        //Find place for key
         size_t pos = get_key_pos(key, true);
         //Create key-value buf
         char buf[BUF_LEN];
@@ -78,9 +182,10 @@ public:
         memcpy(&buf[0], key.c_str(), key.length());
         memcpy(&buf[KEY_LEN], value.c_str(), value.length());
         //Place information into table
-        memcpy(get_line(pos), buf, BUF_LEN);
-        //Debug
-        //std::cout << "Key: " << key << "\tHash: " << pos << "\tValue: " << value << std::endl;
+        char* line = get_line(pos);
+        enter_ca(pos);
+        memcpy(line, buf, BUF_LEN);
+        leave_ca(pos);
     }
 
     std::string delete_key(std::string key) {
@@ -90,32 +195,60 @@ public:
         size_t pos = get_key_pos(key);
         //Clean line
         std::string value = get_value(pos);
-        memset(get_line(pos), 0, BUF_LEN);
+        char* line = get_line(pos);
+        enter_ca(pos);
+        memset(line, 0, BUF_LEN);
+        leave_ca(pos);
         return value;
     }
 
-    void print () {
+    /*void print () {
         for (size_t i = 0; i < size_; i++) {
             std::cout << i << ": " << get_key(i) << ": " << get_value(i) << std::endl;
         }
-    }
+    }*/
 
     ~HashTable() {
         shmdt(table_);
+        if(semctl(semid_, 0, IPC_RMID, 0) == -1) {
+            std::cerr << "semctl() error" << std::endl;
+            _exit(1);
+        }
     }
 private:
+    void enter_ca(size_t pos) {
+        sbf_.sem_num = static_cast<unsigned short>(pos/BLOCK_FOR_SEM);
+        sbf_.sem_op = -1;
+        if (semop(semid_, &sbf_, 1) == -1) {
+            std::cerr << "semop() error" << std::endl;
+            _exit(1);
+        }
+    }
+    void leave_ca(size_t pos) {
+        sbf_.sem_num = static_cast<unsigned short>(pos/BLOCK_FOR_SEM);
+        sbf_.sem_op = 1;
+        if (semop(semid_, &sbf_, 1) == -1) {
+            std::cerr << "semop() error" << std::endl;
+            _exit(1);
+        }
+    }
     bool is_empty(size_t pos) {
         return get_key(pos) == "";
     }
     std::string get_key(size_t pos) {
         char key[KEY_LEN];
-        char *mem = get_line(pos);
-        memcpy(key, mem, KEY_LEN);
+        char *line = get_line(pos);
+        enter_ca(pos);
+        memcpy(key, line, KEY_LEN);
+        leave_ca(pos);
         return std::string(key);
     }
     std::string get_value(size_t pos) {
         char value[VAL_LEN];
-        memcpy(value, &get_line(pos)[KEY_LEN], VAL_LEN);
+        char *line = get_line(pos);
+        enter_ca(pos);
+        memcpy(value, &line[KEY_LEN], VAL_LEN);
+        leave_ca(pos);
         return std::string(value);
     }
     size_t get_key_pos(std::string key, bool empty_too = false) {
@@ -145,6 +278,8 @@ private:
     key_t key_;
     std::hash<std::string> str_hash;
     char* table_;
+    int semid_;
+    struct sembuf sbf_;
 };
 
 class TableWriter {
@@ -186,15 +321,13 @@ private:
 
 class Handler {
 public:
-    Handler(size_t size, int parent) : server_(size), parent_(parent) {
-        std::cout << "I am alive! " << getpid() << std::endl;
-    }
+    Handler(size_t size, int parent) : server_(size), parent_(parent) {}
     ~Handler() { close(parent_); }
 
     void listen() {
-        int client = -1;
-        client = recvfd(parent_);
-        std::cout << getpid() << ": Received message with socket: " << client << std::endl;
+        std::cout << getpid() << ": Ready to work!" << std::endl;
+        int client = recvfd(parent_);
+        std::cout << getpid() << ": Received socket from parent: " << client << std::endl;
         //Talk to client
         talk(client);
     }
@@ -221,46 +354,6 @@ private:
     TableWriter server_;
     int parent_;
 };
-
-static void sendfd(int socket, int fd)
-{
-    struct msghdr msg = { 0 };
-    char buf[CMSG_SPACE(sizeof(fd))];
-    memset(buf, '\0', sizeof(buf));
-    struct iovec io;
-    io.iov_base = (char *)"AC";
-    io.iov_len = 2;
-    msg.msg_iov = &io;
-    msg.msg_iovlen = 1;
-    msg.msg_control = buf;
-    msg.msg_controllen = sizeof(buf);
-    struct cmsghdr * cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
-    *((int *) CMSG_DATA(cmsg)) = fd;
-    msg.msg_controllen = cmsg->cmsg_len;
-    if (sendmsg(socket, &msg, 0) < 0)
-        std::cerr << "ERR\n";
-}
-
-static int recvfd(int socket)
-{
-    struct msghdr msg = {0};
-    char m_buffer[256];
-    struct iovec io = { .iov_base = m_buffer, .iov_len = sizeof(m_buffer) };
-    msg.msg_iov = &io;
-    msg.msg_iovlen = 1;
-    char c_buffer[256];
-    msg.msg_control = c_buffer;
-    msg.msg_controllen = sizeof(c_buffer);
-    if (recvmsg(socket, &msg, 0) < 0)
-        std::cerr << "ERR\n";
-    struct cmsghdr * cmsg = CMSG_FIRSTHDR(&msg);
-    unsigned char * data = CMSG_DATA(cmsg);
-    int fd = *((int*) data);
-    return fd;
-}
 
 void start(int children) {
     int client, listener;
@@ -326,34 +419,55 @@ void start(int children) {
             exit (1);
         }
         sendfd(children, client);
-        std::cout << "Sent socket-message to children with socket: " << client << std::endl;
+        std::cout << "Sent socket to children: " << client << std::endl;
         close(client);
     }
     close(listener);
     close(children);
 }
 
-int main() {
-    size_t size = 10;
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        std::cerr << "Usage: program <size>" << std::endl;
+        return 1;
+    }
+    size_t size = static_cast<size_t>(atoi(argv[1]));
+    MEM_KEY = ftok(argv[0], 'M'+size);
+    SEM_KEY = ftok(argv[0], 'S'+size);
     std::vector<pid_t> children;
-    //CREATE SHARED MEMORY AND CLEAN IT
-    int shmid = shmget(MEM_KEY, size*BUF_LEN, 0666 | IPC_CREAT);
-    if ((shmid == -1) or (errno == EEXIST)) {
-        std::cerr << "shmget() error" << std::endl;
-        return 1;
+    //SHARED MEMORY
+    int shmid = shmget(MEM_KEY, size*BUF_LEN, 0666);
+    if (shmid != -1) {
+        std::cout << "Cleaning shared memory..." << std::endl;
+        char *mem = (char *) shmat(shmid, 0, 0);
+        if (mem == (void *) -1) {
+            std::cerr << getpid() << ": shmat() error" << std::endl;
+            _exit(1);
+        }
+        memset(mem, 0, size * BUF_LEN);
+        shmdt(mem);
     }
-    char *mem = (char *)shmat(shmid, 0, 0);
-    if (mem == (void *)-1) {
-        std::cerr << "shmat() error" << std::endl;
-        return 1;
+    //SEMAPHORES
+    int sem_n = std::max(BLOCK_FOR_SEM, static_cast<int>(size))/BLOCK_FOR_SEM;
+    int semid = semget(SEM_KEY, sem_n, 0666);
+    if (semid != -1) {
+        std::cout << "Cleaning semaphores..." << std::endl;
+        union semun arg;
+        arg.val = 1;
+        for (int i = 0; i < sem_n; i++) {
+            if(semctl(semid, i, SETVAL, arg) == -1) {
+                std::cerr << "semctl() error" << std::endl;
+                _exit(1);
+            }
+        }
     }
-    memset(mem, 0, size*BUF_LEN);
     //CREATE SOCKET TO COMMUNICATE WITH CHILDREN
     int fd[2];
     if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fd) < 0) {
         std::cerr << "socketpair() error" << std::endl;
         return 1;
     }
+    //CREATE HANDLERS
     for (int i = 0; i < N_CHILDREN; i++) {
         pid_t pid = fork();
         if (pid == -1) {
@@ -371,15 +485,15 @@ int main() {
         }
         else children.push_back(pid);
     }
+    //FINISH
     close(fd[c_socket]);
     start(fd[p_socket]);
-    //pickup children
     for (auto child: children) {
         kill(child, SIGINT);
         wait(NULL);
     }
     close(fd[p_socket]);
-    shmdt(mem);
     shmctl(shmid, IPC_RMID, 0);
+    semctl(semid, 0, IPC_RMID, 0);
     return 0;
 }
