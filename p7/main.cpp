@@ -105,22 +105,25 @@ public:
             std::cerr << "inotify_init() error" << std::endl;
         }
 
-        wd = inotify_add_watch(inotifyFd, file_.c_str(), IN_CLOSE_WRITE | IN_CREATE);
+        wd = inotify_add_watch(inotifyFd, file_.c_str(),  IN_CLOSE_WRITE | IN_MODIFY | IN_CREATE);
         if (wd == -1) {
             std::cerr << "inotify_add_watch() error" << std::endl;
             exit(1);
         }
 
-        for (;;) {                                  /* Read events forever */
+        try {
             if (read(inotifyFd, buf, BUF_LEN) <= 0) {
-                std::cerr << "read() error!" << std::endl;
+                std::cout << "read() error!" << std::endl;
                 return;
             }
-            enter_w();
-            vocabulary_.construct(file_);
-            leave_w();
-            std::cout << "Vocabulary updated" << std::endl;
+        } catch(...) {
+            std::cout << "Something strange has happened... Restarting watcher" << std::endl;
         }
+        enter_w();
+        vocabulary_.construct(file_);
+        leave_w();
+        std::cout << "Vocabulary updated" << std::endl;
+        watch();
     }
     //WORKER
     int get_client() {
@@ -142,6 +145,7 @@ public:
             w_.lock();
         mutex1_.unlock();
         r_.unlock();
+        std::cout << "r_lock" << std::endl;
     }
     void leave_r() {
         mutex1_.lock();
@@ -149,6 +153,7 @@ public:
         if (readcount_ == 0)
             w_.unlock();
         mutex1_.unlock();
+        std::cout << "r_unlock" << std::endl;
     }
     void enter_w() {
         mutex2_.lock();
@@ -156,13 +161,17 @@ public:
         if (writecount_ == 1)
             r_.lock();
         mutex2_.unlock();
+        w_.lock();
+        std::cout << "w_lock" << std::endl;
     }
     void leave_w() {
+        w_.unlock();
         mutex2_.lock();
         writecount_--;
         if (writecount_ == 0)
             r_.unlock();
         mutex2_.unlock();
+        std::cout << "w_unlock" << std::endl;
     }
     void talk(int client) {
         char buf[1];

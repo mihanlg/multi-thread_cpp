@@ -8,7 +8,7 @@ CPP = main.cpp
 BUILD_LIST += build
 BUILD_LIST += run
 
-FILENAME = dict_english.txt
+FILENAME = ./dict_english.txt
 
 all: $(BUILD_LIST)
 
